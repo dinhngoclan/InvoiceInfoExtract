@@ -2,19 +2,25 @@
 """
 Created on Thu Apr 28 17:05:24 2022
 
-@author: laptop
+@author: ngoclan
 """
 
 #=======================Convert .xls to .xlsx========================
 import os, glob
 import win32com.client as win32
+from win32com import client
+import time
+#time.sleep(5)
 def convert_xls2xlsx(path):
     excel = win32.gencache.EnsureDispatch('Excel.Application')
+    #excel = client.Dispatch("Excel.Application")
     filenames = glob.glob(path + "\*.xls")
     for file in filenames:
         #os.path.abspath(r".\TCDKO-2204-08 120422 (Kumho-2309)-01 NYLON-BUSAN-XKD.XLS")
+        print ("convert_xls2xlsx: ",file)
         wb = excel.Workbooks.Open(file)
-        wb.SaveAs(file+'x', FileFormat = 51)    #FileFormat = 51 is for .xlsx extension
+        #time.sleep(0.5)
+        wb.SaveAs(file+'x', FileFormat = 51)    #FileFormat = 51 is for .xlsx extension        
         wb.Close()                               #FileFormat = 56 is for .xls extension
         wb = None
     excel.Application.Quit()
@@ -37,9 +43,20 @@ def hide_gridline_in_xlsx(path):
             sheet.sheet_view.showGridLines = False
             sheet.sheet_view.view='normal'
             sheet.paper_size_code = 1
+          
             #sheet.alignment = Alignment(horizontal="center")
+            #remove "///////////////////////////"
+            for r in range(1,sheet.max_row+1):
+                for c in range(1,sheet.max_column+1):
+                    s = sheet.cell(r,c).value
+                    try:
+                        if s != None and "/////////////////////////////////////////////////////////////" in s: 
+                            sheet.cell(r,c).value = ''
+                    except:
+                        pass
         # Save workbook
         wb.save(file)
+        wb.close()
  
 hide_gridline_in_xlsx(os.path.abspath(r".\InvoicesDirectory"))
 
@@ -56,26 +73,58 @@ hide_gridline_in_xlsx(os.path.abspath(r".\InvoicesDirectory"))
 # =============================================================================
 
 #======================Convert .xlsx to .pdf ========================
-from win32com import client
+#from win32com import client
+    
 def xlsx2pdf(path):
     filenames = glob.glob(path + "\*.xlsx")
     xlApp = client.Dispatch("Excel.Application")
-    xlApp.Visible = 0
+    #xlApp = win32.gencache.EnsureDispatch('Excel.Application')
+    #xlApp.Visible = False
     for file in filenames:
+        print("xlsx2pdf: ", file)
         books = xlApp.Workbooks.Open(file)
-        ws = books.Worksheets['INVOICE']
+       
+        try:
+            wsInvoice = books.Worksheets['INVOICE']
+            wsPackageList = books.Worksheets['PACKING LIST']
+        except:
+            try:
+                wsInvoice = books.Worksheets['Invoice ']
+                wsPackageList = books.Worksheets['PList']
+            except:
+                wsInvoice = books.Worksheets['INV CIP']
+                wsPackageList = books.Worksheets['PACKING LIST']
+        wsInvoice.EnableCalculation = True
+        wsInvoice.Calculate()
+        wsInvoice.PageSetup.Zoom = False
+        wsInvoice.PageSetup.FitToPagesTall = 1
+        wsInvoice.PageSetup.FitToPagesWide = 1
+        
+        wsPackageList.EnableCalculation = True
+        wsPackageList.Calculate()
+        wsPackageList.PageSetup.Zoom = False
+        wsPackageList.PageSetup.FitToPagesTall = 1
+        wsPackageList.PageSetup.FitToPagesWide = 1      
+        books.Save()
+        #time.sleep(5)
         #ws.Range("A1", "P100").HorizontalAlignment = 2  #align LEFT 
         #ws.Range("A1", "P80").HorizontalAlignment = 1 #align RIGHT
         try:
-            ws.SaveAs(file+'.pdf', FileFormat=57)
-        except Exception as e:
-            print("Failed to convert")
-            print(str(e))
-        finally:
+            wsInvoice.SaveAs(file+'INVOICE.pdf', FileFormat=57)
+            wsPackageList.SaveAs(file+'PACKING LIST.pdf', FileFormat=57)
             books.Close(True)
+        except Exception as e:
+            print("Failed to convert xlsx to pdf")
+            print(str(e))
+        #finally:
+            
     xlApp.Quit()
+    
+
 
 xlsx2pdf(os.path.abspath(r".\InvoicesDirectory"))
+
+
 #======================Convert .pdf to .png ========================
 from pdf2image import convert_from_path
 filenames = glob.glob('.\InvoicesDirectory' + "\*.pdf")
