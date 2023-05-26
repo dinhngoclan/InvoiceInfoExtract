@@ -350,171 +350,24 @@ def do_extract_from_png(image, file, feature_extractor, tokenizer, model, graph,
                 ''')
                 
     tx.evaluate('''
+                with ['description', 'quantity', 'unit', 'gross', 'net', 'amount'] as quest 
+                match (a:QUESTION)-[r:NEXTWORD]->(b:QUESTION)
+                where any (word in quest where toLower(b.word) contains word)
+                delete r;
+                ''')
+                
+    tx.evaluate('''
                 match (a:ANSWER)-[r1:NEXTWORD]->(b:ANSWER),
                     (a:ANSWER)-[r2:NEXTWORD]->(c:ANSWER)
                 where (r2.x > r1.x  or r2.y - r1.y  > 15)
                 delete r2;
                 ''')
-                              
-    tx.evaluate('''
-                match (q1:QUESTION)-[r1:RELATED]->(a:ANSWER),
-                     (q2:QUESTION)-[r2:RELATED]->(a:ANSWER)
-                where r2.x > r1.x 
-                    //and 0 < q2.y0-10 <= q1.y0 <= q2.y0+10
-                delete r2;
-                ''')
     graph.commit(tx)
-    
-    #Special case for only botom
-    if file and "bottom" in file:        
-        tx = graph.begin()
-        tx.evaluate('''
-            match (a:ANSWER)-[r:NEXTWORD]->(b:ANSWER)
-            where r.x > 57
-            delete r;
-            ''')
-        graph.commit(tx)
-    
-    ################# CONNECT ({word: 'Total'}) QUESTION --> Value ################
-    tx = graph.begin()
-    tx.evaluate('''
-                match (q:QUESTION), (a:ANSWER)
-                where  ( (toLower(q.word) CONTAINS "total")  or (toLower(q.word) CONTAINS "summar") )
-                    and NOT (:ANSWER)-[:NEXTWORD]->(a)
-                    and q.x1 < a.x0
-                    and abs((q.y0+q.y1)/2 - (a.y0+a.y1)/2) < 10  //some rectangel is tall --> calculate average rectangle heigh (y)
-                create (q)-[:RELATED {y:abs((q.y0+q.y1)/2 - (a.y0+a.y1)/2), x:(a.x0 - q.x1)}]->(a);
-                ''')
-    graph.commit(tx)
-    
-    ################# CONNECT below ANS TO above QUESTION #########################
-    #CASE:
-    try:
-        filter1 = table['words'].str.contains('descript|Descript|DESCRIPT')
-        description_y0 = table.where(filter1).dropna().reset_index(drop=True)['origBoxes'].iloc[0][1]
-    except:
-        description_y0 = 950
-    tx = graph.begin()    
-    tx.evaluate('''
-                with ['quantity', 'unit', 'net', 'gross', 'amount','total','po no','pono','no'] as not_map_now //Unit here is UnitPrice
-                match (q:QUESTION), (a:ANSWER)
-                where not((q:QUESTION)-[]->(:QUESTION)) //end word in A question string
-                    and not any (word in not_map_now where toLower(q.word) contains word)
-                    //and NONE( x in ['PO NO','PONO','NO'] where q.word contains x) //some time 'PO' 'NO' are on 2 different nodes
-                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
-                    and abs(a.y0 - q.y1) < 35
-                    and abs(a.x0 - q.x0) < $width/3.5
-                    and q.y0 < $description_y0 // 950 date modify: 20220725
-                create (q)-[:RELATED {y:abs(a.y0 - q.y1), x:abs(a.x1 - q.x0)}]->(a);
-                ''', parameters = {'width': width, 'description_y0':description_y0})
-    graph.commit(tx)
-    
-    #CASE: Summarize table (Description of Goods)
-    focusHigh = 550
-    if file:
-        if "INVOICE" in file or "bottom" in file:     
-            focusHigh = 650
-    tx = graph.begin()
-    tx.evaluate('''
-                with ['Goods'] as qung 
-                match (qstart:QUESTION), (qend:QUESTION), (a:ANSWER)
-                where not(()-[]->(qstart:QUESTION)) //start word in A question string
-                    and not ((qend:QUESTION)-[]->(:QUESTION)) //end word in A question string
-                    and ((qstart:QUESTION)-[*0..]->(qend:QUESTION)) //a path from start 2 end (qstart->qend)
-                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
-                    and a.y0 - qstart.y1 > 0 and a.y0 - qstart.y1 < $focusHigh //  280 không lấy xuống quá nhiều
-                    and abs(a.x0 - qstart.x0) < 60 //45  --date modify: 20220725
-                    and any (word in qung where qend.word contains word)
-                    and not any (word in ['SAVANNAH', 'VIETNAM', 'CHILE', 'USA', 'CANADA'] where a.word contains word)
-                    //and not exists ( OPTIONAL MATCH  (ansAboveA:ANSWER)
-                    //                    where abs(ansAboveA.x0 - a.x0) < 5  and  0 < a.y0-ansAboveA.y0 )
-                create (qend)-[:RELATED {y:abs(a.y0 - qend.y1), x:abs(a.x1 - qend.x0)}]->(a);
-                ''', parameters = {'focusHigh': focusHigh})
-    graph.commit(tx)
-    
-    #CASE: Summarize table (Quantity-Unit, G.W, N.W, Unit-Price, Amount)
-    tx = graph.begin()
-    tx.evaluate('''
-                with ['Quantity', 'Unit', 'Net', 'NET', 'Gross', 'GROSS', 'AMOUNT', 'Amount', 'ROLL', 'PALLET', 'PACKAGE'] as qung //Unit here is UnitPrice
-                match (qstart:QUESTION), (qend:QUESTION), (a:ANSWER),
-                        questionPath = (qstart)-[*0..]->(qend)
-                where not(()-[]->(qstart:QUESTION)) //start word in A question string
-                    and not ((qend:QUESTION)-[]->(:QUESTION)) //end word in A question string
-                    and ((qstart:QUESTION)-[*0..]->(qend:QUESTION)) //a path from start 2 end (qstart->qend)
-                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
-                    and a.y0 - qstart.y1 > 0 and a.y0 - qstart.y1 <  $focusHigh  //  450 không lấy xuống quá nhiều
-                    and (   (qend.x0-a.x0 < 60 //45  --date modify: 20220725
-                             and   qend.x0-a.x0 > 0 )
-                            or  abs(a.x0 - qstart.x0) < 55
-                        )
-                    //and any (word in qung where qend.word contains word or qstart.word contains word)
-                    and any (word in qung where any (q in nodes(questionPath) where q.word contains word) )
-                    //and not exists ( OPTIONAL MATCH  (ansAboveA:ANSWER)
-                    //                    where abs(ansAboveA.x0 - a.x0) < 5  and  0 < a.y0-ansAboveA.y0 )
-                create (qend)-[:RELATED {y:abs(a.y0 - qend.y1), x:abs(a.x1 - qend.x0)}]->(a);
-                ''', parameters = {'focusHigh': focusHigh})
-    graph.commit(tx)
-    
-    #CASE: "CONTAINER/SEAL NO"
-    tx = graph.begin()
-    tx.evaluate('''
-                with ['container', 'seal'] as container_seal_no //Unit here is UnitPrice
-                match (qstart:QUESTION), (qend:QUESTION), (a:ANSWER)
-                where not(()-[]->(qstart:QUESTION)) //start word in A question string
-                    and not ((qend:QUESTION)-[]->(:QUESTION)) //end word in A question string
-                    and ((qstart:QUESTION)-[*0..]->(qend:QUESTION)) //a path from start 2 end (qstart->qend)
-                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
-                    and a.y0 - qstart.y1 > 0 
-                    //and   qend.x0-a.x0 < 60 //45  --date modify: 20220725
-                    and   qstart.x0-a.x0 > 0 and a.y0 - qstart.y1 <  $focusHigh / 3
-                    and any (word in container_seal_no where toLower(qstart.word) contains word)
-                    //and not exists ( OPTIONAL MATCH  (ansAboveA:ANSWER)
-                    //                    where abs(ansAboveA.x0 - a.x0) < 5  and  0 < a.y0-ansAboveA.y0 )
-                create (qend)-[:RELATED {y:abs(a.y0 - qend.y1), x:abs(a.x1 - qend.x0)}]->(a);
-                ''', parameters = {'focusHigh': focusHigh})
-    graph.commit(tx)
-    
-    tx = graph.begin()
-    tx.evaluate('''
-        with ['quantity', 'unit', 'net', 'gross', 'amount','goods', 'total'] as qung //Unit here is UnitPrice, [20220802]
-        match (q1:QUESTION)-[r1:RELATED]->(a:ANSWER),
-              (q2:QUESTION)-[r2:RELATED]->(a:ANSWER)
-        where r2.x > r1.x
-            and not any (word in qung where toLower(q2.word) contains word)
-        delete r2;
-        ''')
-    graph.commit(tx)
-    
-    tx = graph.begin()
-    tx.evaluate('''
-        match (a1:ANSWER)-[r1:NEXTWORD]->(a11:ANSWER),
-              (a1:ANSWER)-[r2:NEXTWORD]->(a12:ANSWER)
-        where abs(a11.y0 - a12.y0) < 3 and abs(a11.y1 - a12.y1) < 3 
-            and a11.x1 < a12.x0
-        delete r2;
-        ''')
-    graph.commit(tx)
-    
-    ##################### FORCE some :OTHER to become :ANSWER #####################
-    #####            Concate the right :OTHER to the left :ANSWER
-    tx = graph.begin()
-    tx.evaluate('''
-                match p=(q:QUESTION) - [*1..] -> (a:ANSWER), (o:OTHER)
-                where any(rel in relationships(p) WHERE type(rel) = "RELATED")
-                    and not((:QUESTION)-[:NEXTWORD]->(q:QUESTION)) //get the longest path
-                    and not((a:ANSWER)-[:NEXTWORD]->()) //get the longest path
-                    and abs(a.y0 - o.y0) < 20 
-                    and o.x0 - a.x1 > 0 //:OTHER must right of :ANSWER
-                    and o.x0 - a.x1 <= 250
-                REMOVE o:OTHER
-                SET o:ANSWER
-                create (a)-[:NEXTWORD {y:abs(a.y0 - o.y0)}]->(o);
-                ''')
-    graph.commit(tx)
+
     
     ##################### extend Question-->Answer Graph Func #####################
     if extQuestionAnswerGraphFunc:
-        extQuestionAnswerGraphFunc(graph, file=file)
+        extQuestionAnswerGraphFunc(graph, file=file,tablePD=table, considerWidth=width)
     
     ################################   #GET RESULT  ############################
     query ='''
@@ -568,7 +421,10 @@ def getContainerSealNo_fromPdf(pdfFile):
         tableContainerSealNo = tableContainerSealNo.T.reset_index().T                
         if tableContainerSealNo.shape[0] < 10 and 7 < len(tableContainerSealNo.iloc[0][0]) < 15 and len(tableContainerSealNo.iloc[0][1]) < 15:
             #format Container | Seal | Lbs | Roll | Amount  --> 5 columns
-            if len(tableContainerSealNo.columns) == 5:                                                                                 
+            tableContainerSealNo[tableContainerSealNo.columns[0]] = tableContainerSealNo[tableContainerSealNo.columns[0]].astype(str)
+            tableContainerSealNo[tableContainerSealNo.columns[1]] = tableContainerSealNo[tableContainerSealNo.columns[1]].astype(str)
+            if len(tableContainerSealNo.columns) == 5:
+                
                 tableContainerSealNo[r'Container \ Seal No'] = tableContainerSealNo[tableContainerSealNo.columns[0]] + " / " + tableContainerSealNo[tableContainerSealNo.columns[1]]
                 strContainerSealNo = '\n'.join(tableContainerSealNo[~tableContainerSealNo[r'Container \ Seal No'].isnull()][r'Container \ Seal No']) 
                 #====================== 6 columns ============================
@@ -583,7 +439,11 @@ def getContainerSealNo_fromPdf(pdfFile):
             elif len(tableContainerSealNo.columns) == 6:
                 tableContainerSealNo[r'Container \ Seal No'] = tableContainerSealNo[tableContainerSealNo.columns[0]] + " " + tableContainerSealNo[tableContainerSealNo.columns[1]]
                 strContainerSealNo = '\n'.join(tableContainerSealNo[~tableContainerSealNo[r'Container \ Seal No'].isnull()][r'Container \ Seal No']) 
-        return strContainerSealNo
+        
+        if "Unname" in strContainerSealNo or "TOTAL" in strContainerSealNo:
+            return ""
+        
+        return strContainerSealNo 
     except:
         return ""
 
@@ -742,13 +602,13 @@ def invoice_info_extract_from_png(feature_extractor, tokenizer, model, graph, pa
                             continue
                     notifyConsigneePD = notifyConsigneePD[['question', 'answer']].drop_duplicates()
                     
-                    df = pd.merge(dfLeft, df, how='outer', left_on = 'question', right_on = 'question')                    
+                    df = pd.merge(dfLeft, df, how='outer', left_on = ['question','answer'], right_on = ['question','answer'])                    
                 elif cut_image_item == "top":            
                     dfTop = do_extract_from_png(halfTopImage, file+'_top', feature_extractor, tokenizer, model, graph, lstHasToBeQuestion, lstHasToBeAnswer, extQuestionAnswerGraphFunc)
-                    df = pd.merge(dfTop, df, how='outer', left_on = 'question', right_on = 'question')
+                    df = pd.merge(dfTop, df, how='outer', left_on = ['question','answer'], right_on = ['question','answer'])
                 elif cut_image_item == "bottom":              
                     dfBottom = do_extract_from_png(halfBottomImage, file+'_bottom', feature_extractor, tokenizer, model, graph, lstHasToBeQuestion, lstHasToBeAnswer, extQuestionAnswerGraphFunc, lstWordsFromPdf)
-                    desOfGoodsDf =  dfBottom.loc[dfBottom['question'].str.contains('Description|Goods')]
+                    desOfGoodsDf =  dfBottom.loc[dfBottom['question'].str.contains('Description|Goods|goods')]
                     #notDesOfGoodsDf =  dfBottom.loc[~dfBottom['question'].isin(['Description of Goods'])]
                     notDesOfGoodsDf =  dfBottom.drop(desOfGoodsDf.index) #Quantity|Net|NET|Gross|GROSS|AMOUNT
                     filter2 = notDesOfGoodsDf['answer'].str.contains('KGS') #only get KGS, not other ~LBS ~Ib
@@ -790,24 +650,25 @@ def invoice_info_extract_from_png(feature_extractor, tokenizer, model, graph, pa
                     #In some cases, dfBottom doesn't have DescriptionOfGood
                     try:
                         if desOfGoodsDf.shape[0] == 0:
-                            desOfGoodsDf_x =  df.loc[df['question'].str.contains('Description|Goods')][['question','answer_x']].drop_duplicates()
+                            desOfGoodsDf_x =  df.loc[df['question'].str.contains('Description|Goods|goods')][['question','answer_x']].drop_duplicates()
                             desOfGoodsDf_x['answer_x'] =  desOfGoodsDf_x.groupby(['question'])['answer_x'].transform(lambda x : '\n'.join(x)).drop_duplicates()
                             desOfGoodsDf_x.dropna(inplace =True)
                             desOfGoodsDf_x.rename({'answer_x':'answer'}, axis=1,inplace=True)
                             desOfGoodsDf_x.reset_index(drop=True, inplace=True)
                             
-                            desOfGoodsDf_y =  df.loc[df['question'].str.contains('Description|Goods')][['question','answer_y']].drop_duplicates()
+                            desOfGoodsDf_y =  df.loc[df['question'].str.contains('Description|Goods|goods')][['question','answer_y']].drop_duplicates()
                             desOfGoodsDf_y['answer_y'] =  desOfGoodsDf_y.groupby(['question'])['answer_y'].transform(lambda x : '\n'.join(x)).drop_duplicates()
                             desOfGoodsDf_y.dropna(inplace =True)
                             desOfGoodsDf_y.rename({'answer_y':'answer'}, axis=1,inplace=True)
                             desOfGoodsDf_y.reset_index(drop=True, inplace=True)
                             
                             desOfGoodsDf = desOfGoodsDf_x if len(desOfGoodsDf_x['answer'][0]) >= len(desOfGoodsDf_y['answer'][0]) else desOfGoodsDf_y
-                            df = df.loc[~df['question'].str.contains('Description|Goods')]
+                            df = df.loc[~df['question'].str.contains('Description|Goods|goods')]
                     except:
                         pass
                         
-                    df = pd.merge(notDesOfGoodsDf.append(desOfGoodsDf), df, how='outer', left_on = 'question', right_on = 'question')
+                    #df = pd.merge(notDesOfGoodsDf.append(desOfGoodsDf), df, how='outer', left_on = 'question', right_on = 'question')                    
+                    df = pd.merge(notDesOfGoodsDf.append(desOfGoodsDf), df, how='outer', left_on = ['question','answer'], right_on = ['question','answer'])
 
         try:
             df['answer_x'] = df['answer_x'] .fillna(df['answer_y'] )
@@ -842,10 +703,8 @@ def invoice_info_extract_from_png(feature_extractor, tokenizer, model, graph, pa
                               'sort':[reverseSwitcher.get("PackingMethod", 888), reverseSwitcher.get("UNIT", 888), reverseSwitcher.get("N.W", 888), reverseSwitcher.get("G.W", 888)]})
             df = df.append(t)
             
-        df.reset_index(drop=True, inplace=True)
-        
+        df.reset_index(drop=True, inplace=True)        
         dfFinal = question2header_func(df)
-
        
                 
         out_collection[os.path.basename(file)] = dfFinal[['question', 'question2header', 'answer', 'sort']]

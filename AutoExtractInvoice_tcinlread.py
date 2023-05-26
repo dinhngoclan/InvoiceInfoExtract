@@ -41,6 +41,7 @@ switcherTcInlRead = {
 def question2header_func(df):
     t=None
     t2=None
+    hasParseDateOfInvoice = False
     for index, row in df.iterrows():
         quest = row['question'].lower()
         if 'date' in quest and 'invoice' in quest and len(row['answer']) > 5:
@@ -49,15 +50,17 @@ def question2header_func(df):
                 df.at[index,'answer'] = pd.to_datetime(dt.strftime('%d-%b-%Y') )#.strftime('%d/%m/%Y')
                 df.at[index,'question2header'] = "Invoice Date"
                 df.at[index,'sort'] = 3
+                hasParseDateOfInvoice = True
             except:
                 df.at[index,'question2header'] = "Invoice No"
                 df.at[index,'sort'] = 2
-        elif 'date' in quest and len(row['answer']) > 5:
+        elif 'date' in quest and len(row['answer']) > 5 and ("lic" not in quest and "l/c" not in quest and "lc" not in quest):
             try: #dateutil.parser.
                 dt = parse( row['answer'])
                 df.at[index,'answer'] = pd.to_datetime(dt.strftime('%d-%b-%Y'))
-                df.at[index,'question2header'] = "Invoice Date"
-                df.at[index,'sort'] = 3
+                if not hasParseDateOfInvoice:
+                    df.at[index,'question2header'] = "Invoice Date"
+                    df.at[index,'sort'] = 3
             except:                     
                 df.at[index,'question2header'] = "Invoice No"
                 df.at[index,'sort'] = 2
@@ -75,10 +78,13 @@ def question2header_func(df):
             df.at[index,'sort'] = 14
         elif re.search(r'sai[a-z]ing', quest) is not None: # 'sailing' in quest:
             try: #dateutil.parser
-                dt = parse( row['answer'])
-                df.at[index,'answer'] = pd.to_datetime(dt.strftime('%d-%b-%Y'))
-                df.at[index,'question2header'] = "Sailing on About"
-                df.at[index,'sort'] = 15
+                if len(row['answer']) > 6:
+                    dt = parse( row['answer'])
+                    df.at[index,'answer'] = pd.to_datetime(dt.strftime('%d-%b-%Y'))
+                    df.at[index,'question2header'] = "Sailing on About"
+                    df.at[index,'sort'] = 15
+                else:
+                    df.at[index,'question2header'] = ""
             except:                    
                 df.at[index,'question2header'] = ""
         elif 'notify' in quest and 'party' in quest:
@@ -90,7 +96,8 @@ def question2header_func(df):
         elif 'shipper' in quest or quest == 'to:':
             df.at[index,'question2header'] = "Shipper"
             df.at[index,'sort'] = 1
-        elif 'amount' in quest or 'total' in quest or 'cfr value' in quest:
+        elif ('amount' in quest or 'total' in quest or 'cfr value' in quest or 'cif value' in quest )\
+            and ("ROLL" not in row['answer'] and "PACKAGE" not in row['answer'] ):
             df.at[index,'answer'] = row['answer'].replace(" ","")
             df.at[index,'question2header'] = "Amount"
             df.at[index,'sort'] = 11
@@ -124,7 +131,7 @@ def question2header_func(df):
         elif 'container' in quest:
             df.at[index,'question2header'] = "Container \ Seal No"
             df.at[index,'sort'] = 12
-        elif 'quantity' in quest:
+        elif ('quantity' in quest):
             #pattern = re.compile("^[0-9]+[A-Za-z(A-Za-z)]+")
             if re.match(r"^[0-9]+[A-Za-z]+",row['answer']) \
                 or re.match(r"^[0-9]+ [A-Za-z]+",row['answer']):   #format numberPackingMethod ex: 68Pallet(s), 87Roll(s)
@@ -137,20 +144,41 @@ def question2header_func(df):
                 #df = df.append(t) #cannot append in for loop
         elif 'roll' in quest or 'pallet' in quest or 'package' in quest :
             unit = None
-            try:
-                unit = float(row['answer'].split('-')[-1])
-            except:
-                unit = row['answer'].split('-')[-1]
+            if '-' in row['answer']:
+                try:
+                    unit = float(row['answer'].split('-')[-1])
+                except:
+                    unit = row['answer'].split('-')[-1]
+            else:
+                unit = float(re.findall(r'\d+', row['answer'])[0])
+                
             if t2 is None:
                 t2 = pd.DataFrame({'question':[ "UNIT", "PackingMethod"],
                                   'question2header':["UNIT", "PackingMethod"], 
                                   'answer':[unit, quest.split(' ')[0].upper() ], 
-                                  'sort':[8, 9]})       
+                                  'sort':[8, 9]})
             else:
                 t2 = t2.append( pd.DataFrame({'question':[ "UNIT", "PackingMethod"],
                                   'question2header':["UNIT", "PackingMethod"], 
                                   'answer':[unit, quest.split(' ')[0].upper() ], 
                                   'sort':[8, 9]}) )
+        elif row['answer']:
+            try:
+                answer = row['answer'].upper()
+                if ("ROLL" in answer or "PACKAGE" in answer or "PALLET" in answer):
+                    unit = 0
+                    if re.match(r"^[0-9]+[ ]*[A-Za-z]+",row['answer']):   #format numberPackingMethod ex: 68Pallet(s), 87Roll(s)
+                        unit = float(re.findall(r'\d+', row['answer'])[0])
+                    elif re.match(r"^[A-Za-z]+[ ]*[0-9]+",row['answer']):
+                        unit = float(re.findall(r'\d+', row['answer'])[0])
+                    
+                    if unit > 0 and  (t is None or t['answer'][0] < unit):
+                        t = pd.DataFrame({'question':[ "UNIT", "PackingMethod"],
+                                          'question2header':["UNIT", "PackingMethod"], 
+                                          'answer':[unit, re.findall(r'[A-Za-z]+', row['answer'])[0]], 
+                                          'sort':[8, 9]})
+            except:
+                pass
     if t is not None:
         return df.append(t)
     if t2 is not None:
@@ -158,13 +186,170 @@ def question2header_func(df):
     return df
 
 
-def extQuestionAnswerGraphFunc(graph, file=None):
+def extQuestionAnswerGraphFunc(graph, file=None, tablePD=None, considerWidth=None):
+    #DELETE Redundant relations
+    tx = graph.begin()                            
+    tx.evaluate('''
+                match (q1:QUESTION)-[r1:RELATED]->(a:ANSWER),
+                     (q2:QUESTION)-[r2:RELATED]->(a:ANSWER)
+                where r2.x > r1.x 
+                    //and 0 < q2.y0-10 <= q1.y0 <= q2.y0+10
+                delete r2;
+                ''')
+    graph.commit(tx)
+    
+    #Special case for only botom
+    if file and "bottom" in file:        
+        tx = graph.begin()
+        tx.evaluate('''
+            match (a:ANSWER)-[r:NEXTWORD]->(b:ANSWER)
+            where r.x > 57
+            delete r;
+            ''')
+        graph.commit(tx)
+    
+    ################# CONNECT ({word: 'Total'}) QUESTION --> Value ################
+    tx = graph.begin()
+    tx.evaluate('''
+                match (q:QUESTION), (a:ANSWER)
+                where  ( (toLower(q.word) CONTAINS "total")  or (toLower(q.word) CONTAINS "summar") )
+                    and NOT (:ANSWER)-[:NEXTWORD]->(a)
+                    and q.x1 < a.x0
+                    and abs((q.y0+q.y1)/2 - (a.y0+a.y1)/2) < 10  //some rectangel is tall --> calculate average rectangle heigh (y)
+                create (q)-[:RELATED {y:abs((q.y0+q.y1)/2 - (a.y0+a.y1)/2), x:(a.x0 - q.x1)}]->(a);
+                ''')
+    graph.commit(tx)
+    
+    ################# CONNECT below ANS TO above QUESTION #########################
+    #CASE:
+    try:
+        filter1 = tablePD['words'].str.contains('descript|Descript|DESCRIPT')
+        description_y0 = tablePD.where(filter1).dropna().reset_index(drop=True)['origBoxes'].iloc[0][1]
+    except:
+        description_y0 = 950
+    tx = graph.begin()
+    tx.evaluate('''
+                with ['quantity', 'unit', 'net', 'gross', 'amount','total','po no','pono','no'] as not_map_now //Unit here is UnitPrice
+                match (q:QUESTION), (a:ANSWER)
+                where not((q:QUESTION)-[]->(:QUESTION)) //end word in A question string
+                    and not any (word in not_map_now where toLower(q.word) contains word)
+                    //and NONE( x in ['PO NO','PONO','NO'] where q.word contains x) //some time 'PO' 'NO' are on 2 different nodes
+                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
+                    and abs(a.y0 - q.y1) < 35
+                    and abs(a.x0 - q.x0) < $width/3.0
+                    and q.y0 < $description_y0 // 950 date modify: 20220725
+                create (q)-[:RELATED {y:abs(a.y0 - q.y1), x:abs(a.x1 - q.x0)}]->(a);
+                ''', parameters = {'width': considerWidth, 'description_y0':description_y0})
+    graph.commit(tx)
+    
+    #CASE: Summarize table (Description of Goods)
+    focusHigh = 550
+    if file:
+        if "INVOICE" in file or "bottom" in file:     
+            focusHigh = 650
+    tx = graph.begin()
+    tx.evaluate('''
+                with ['goods'] as qung 
+                match (qstart:QUESTION), (qend:QUESTION), (a:ANSWER)
+                where not(()-[]->(qstart:QUESTION)) //start word in A question string
+                    and not ((qend:QUESTION)-[]->(:QUESTION)) //end word in A question string
+                    and ((qstart:QUESTION)-[*0..]->(qend:QUESTION)) //a path from start 2 end (qstart->qend)
+                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
+                    and a.y0 - qstart.y1 > 0 and a.y0 - qstart.y1 < $focusHigh //  280 không lấy xuống quá nhiều
+                    and abs(a.x0 - qstart.x0) < 260 //45  --date modify: 20220725
+                    and any (word in qung where toLower(qend.word) contains word)
+                    and not any (word in ['SAVANNAH', 'VIETNAM', 'CHILE', 'USA', 'CANADA'] where a.word contains word)
+                    //and not exists ( OPTIONAL MATCH  (ansAboveA:ANSWER)
+                    //                    where abs(ansAboveA.x0 - a.x0) < 5  and  0 < a.y0-ansAboveA.y0 )
+                create (qend)-[:RELATED {y:abs(a.y0 - qend.y1), x:abs(a.x1 - qend.x0)}]->(a);
+                ''', parameters = {'focusHigh': focusHigh})
+    graph.commit(tx)
+    
+    #CASE: Summarize table (Quantity-Unit, G.W, N.W, Unit-Price, Amount)
+    tx = graph.begin()
+    tx.evaluate('''
+                with ['quantity', 'unit', 'net', 'gross', 'amount', 'roll', 'pallet', 'package'] as question //Unit here is UnitPrice
+                match (qstart:QUESTION), (qend:QUESTION), (a:ANSWER),
+                        questionPath = (qstart)-[*0..]->(qend)
+                where not(()-[]->(qstart:QUESTION)) //start word in A question string
+                    and not ((qend:QUESTION)-[]->(:QUESTION)) //end word in A question string
+                    and ((qstart:QUESTION)-[*0..]->(qend:QUESTION)) //a path from start 2 end (qstart->qend)
+                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
+                    //and any (word in question where toLower(qend.word) contains word or toLower(qstart.word) contains word)
+                    and any (word in question where any (q in nodes(questionPath) where toLower(q.word) contains word) )
+                    and a.y0 - qstart.y1 > 0 and a.y0 - qstart.y1 <  $focusHigh  //  450 không lấy xuống quá nhiều
+                    and (   (qend.x0-a.x0 < 60 //45  --date modify: 20220725
+                             and   qend.x0-a.x0 > 0 )
+                            or  abs(a.x0 - qstart.x0) < 62 --55
+                        )
+                    //and not exists ( OPTIONAL MATCH  (ansAboveA:ANSWER)
+                    //                    where abs(ansAboveA.x0 - a.x0) < 5  and  0 < a.y0-ansAboveA.y0 )
+                create (qend)-[:RELATED {y:abs(a.y0 - qend.y1), x:abs(a.x1 - qend.x0)}]->(a);
+                ''', parameters = {'focusHigh': focusHigh})
+    graph.commit(tx)
+    
+    #CASE: "CONTAINER/SEAL NO"
+    tx = graph.begin()
+    tx.evaluate('''
+                with ['container', 'seal'] as container_seal_no //Unit here is UnitPrice
+                match (qstart:QUESTION), (qend:QUESTION), (a:ANSWER)
+                where not(()-[]->(qstart:QUESTION)) //start word in A question string
+                    and not ((qend:QUESTION)-[]->(:QUESTION)) //end word in A question string
+                    and ((qstart:QUESTION)-[*0..]->(qend:QUESTION)) //a path from start 2 end (qstart->qend)
+                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
+                    and a.y0 - qstart.y1 > 0 
+                    //and   qend.x0-a.x0 < 60 //45  --date modify: 20220725
+                    and   qstart.x0-a.x0 > 0 and a.y0 - qstart.y1 <  $focusHigh / 3
+                    and any (word in container_seal_no where toLower(qstart.word) contains word)
+                    //and not exists ( OPTIONAL MATCH  (ansAboveA:ANSWER)
+                    //                    where abs(ansAboveA.x0 - a.x0) < 5  and  0 < a.y0-ansAboveA.y0 )
+                create (qend)-[:RELATED {y:abs(a.y0 - qend.y1), x:abs(a.x1 - qend.x0)}]->(a);
+                ''', parameters = {'focusHigh': focusHigh})
+    graph.commit(tx)
+    
+    tx = graph.begin()
+    tx.evaluate('''
+        with ['quantity', 'unit', 'net', 'gross', 'amount','goods', 'total'] as qung //Unit here is UnitPrice, [20220802]
+        match (q1:QUESTION)-[r1:RELATED]->(a:ANSWER),
+              (q2:QUESTION)-[r2:RELATED]->(a:ANSWER)
+        where r2.x > r1.x
+            and not any (word in qung where toLower(q2.word) contains word)
+        delete r2;
+        ''')
+    graph.commit(tx)
+    
+    tx = graph.begin()
+    tx.evaluate('''
+        match (a1:ANSWER)-[r1:NEXTWORD]->(a11:ANSWER),
+              (a1:ANSWER)-[r2:NEXTWORD]->(a12:ANSWER)
+        where abs(a11.y0 - a12.y0) < 3 and abs(a11.y1 - a12.y1) < 3 
+            and a11.x1 < a12.x0
+        delete r2;
+        ''')
+    graph.commit(tx)
+    
+    ##################### FORCE some :OTHER to become :ANSWER #####################
+    #####            Concate the right :OTHER to the left :ANSWER
+    tx = graph.begin()
+    tx.evaluate('''
+                match p=(q:QUESTION) - [*1..] -> (a:ANSWER), (o:OTHER)
+                where any(rel in relationships(p) WHERE type(rel) = "RELATED")
+                    and not((:QUESTION)-[:NEXTWORD]->(q:QUESTION)) //get the longest path
+                    and not((a:ANSWER)-[:NEXTWORD]->()) //get the longest path
+                    and abs(a.y0 - o.y0) < 20 
+                    and o.x0 - a.x1 > 0 //:OTHER must right of :ANSWER
+                    and o.x0 - a.x1 <= 250
+                REMOVE o:OTHER
+                SET o:ANSWER
+                create (a)-[:NEXTWORD {y:abs(a.y0 - o.y0)}]->(o);
+                ''')
+    graph.commit(tx)
     
     ################# CONNECT "Container No." to Answer #########################
     #CASE: file "TCUSCF-2207-03 1(NYLON 018)GY.xls" like below:
     #	          CONTAINER NO.		
     #   BEAU5278373 / VN1626314A	
-    tx = graph.begin()    
+    tx = graph.begin()
     tx.evaluate('''
                 match (q1:QUESTION), (q2:QUESTION), (a:ANSWER)
                 where ((q1:QUESTION)-[]->(q2:QUESTION)) //
@@ -213,8 +398,7 @@ model = LayoutLMv2ForTokenClassification.from_pretrained(r".\savedmodel")
 #uri = "neo4j+s://dff0ff04.databases.neo4j.io"
 uri = "neo4j://localhost:7687"
 user = "neo4j"
-#password = "CJY__L21_jWwCzLqipfOM0WrAoPOH7LEomMCfN2GFN0"
-password = "pa@ss"
+password = "CJY__L21_jWwCzLqipfOM0WrAoPOH7LEomMCfN2GFN0"
 graph = Graph(uri, auth=(user, password))
 
 transforms = album.Compose([
@@ -224,8 +408,8 @@ transforms = album.Compose([
 ])
 tablePred = TablePredict(r'.\savedmodel\best_model.ckpt', transforms)
 
-lstHasToBeQuestion=["Goods","Good","goods","good","CFR","TOTAL","Total","cfr", "Sailing","Shipper"]
-lstHasToBeAnswer=["HYOSUNG", "VIETNAM", "USA","CO.,LTD.","CO.,LTD","CO.LTD","TEL", "Tel","ATTN", "FAX","Fax", '[\d]+ROLL', '[\d]+ ROLL', '[\d]+ PAL', '[\d]+PAL']
+lstHasToBeQuestion=["Description", "Descriptions","Goods","Good","goods","good","CFR","TOTAL","Total","cfr", "Sailing","Shipper"]
+lstHasToBeAnswer=["HYOSUNG", "VIETNAM", "VIET", "NAM", "USA","CO.,LTD.","CO.,LTD","CO.LTD","TEL", "Tel","ATTN", "FAX","Fax", '[\d]+ROLL', '[\d]+ ROLL', '[\d]+ PAL', '[\d]+PAL']
 
 output_dictionary_png_df = {}
 invoice_info_extract_from_png(feature_extractor, tokenizer, model, graph, os.path.abspath(r".\InvoicesDirectory"), question2header_func, 
@@ -259,10 +443,16 @@ for k, v in output_dictionary_png_df.items():
     print("Process output_dictionary_png_df: ",k)
     ############## DO Merge step of INVOICE and PACKINGLIST#####################
     file = k.split('.',1)[0]
-    temp = v[['question2header', 'answer','sort']]
+    temp = v[['question','question2header', 'answer','sort']]
     temp.replace("", float("NaN"), inplace=True)
-    temp.dropna(subset=['question2header'], inplace=True)
+    temp.dropna(subset=['question2header'], inplace=True)    
+    tempDate =  temp.loc[temp['question2header'].str.contains('Invoice Date')]
+    tempDateInovice =  tempDate.loc[tempDate['question'].str.contains('Invoice|Invoices|invoice|invoices')]        
+    tempDate =  tempDate.drop(tempDateInovice.index) 
+    temp =  temp.drop(tempDate.index)
+    temp = temp[['question2header', 'answer','sort']]    
     temp.reset_index(drop=True, inplace=True)
+    
     if file in output_dictionaryFinal:
         tempV = output_dictionaryFinal[file]
 
@@ -298,6 +488,13 @@ for k, v in output_dictionary_png_df.items():
         notifyConsigneePD.drop_duplicates(inplace=True)
             
         finalPD = pd.merge(temp, tempV, how='outer', left_on = ['question2header','sort'], right_on = ['question2header','sort']).drop_duplicates()
+        finalPDSailingDate =  finalPD.loc[finalPD['question2header'].str.contains('Sailing on About')]
+        finalPDSailingDateSame =  finalPDSailingDate.loc[finalPDSailingDate['answer_x'] == finalPDSailingDate['answer_y']]
+        finalPDSailingDateDiff =  finalPDSailingDate.loc[finalPDSailingDate['answer_x'] != finalPDSailingDate['answer_y']]
+        if finalPDSailingDateSame.shape[0] > 0:
+            finalPD = finalPD.drop(finalPDSailingDateDiff.index) 
+        
+        
         # lay data theo condtion
         finalPD['answer'] = ""
         currency = ""
@@ -320,9 +517,10 @@ for k, v in output_dictionary_png_df.items():
                 # maybeInvoiceNo = file.split(' ',1)[0]
                 # if maybeInvoiceNo != finalPD.at[index,'answer']:#force the right value, case: file name of *.xls always start with InvoiceNO 
                 #     finalPD.at[index,'answer'] = maybeInvoiceNo 
-                if  ' 'in  finalPD.at[index,'answer']:
-                    finalPD.at[index,'answer'] = finalPD.at[index,'answer'].split(' ')[0]
-                elif len(finalPD.at[index,'answer']) < 8:
+                #if  ' 'in  finalPD.at[index,'answer']:
+                #    finalPD.at[index,'answer'] = finalPD.at[index,'answer'].split(' ')[0]
+                #elif len(finalPD.at[index,'answer']) < 8:
+                if len(finalPD.at[index,'answer']) < 8:
                     finalPD.at[index,'question2header'] += "(TOBE DELETED)"
             elif quest in ['G.W', 'N.W', 'Notify Party', 'Consignee', 'Sailing on About', 'UnitPrice', 'Invoice Date', 'Container \ Seal No', 'Description of Goods','UNIT','PackingMethod']:
                 finalPD.at[index,'answer'] = row['answer_y']  if pd.isna(row['answer_x']) else row['answer_x']
@@ -330,10 +528,17 @@ for k, v in output_dictionary_png_df.items():
                 ansx = "" if pd.isna(row['answer_x']) else row['answer_x']
                 ansy = "" if pd.isna(row['answer_y']) else row['answer_y']
                 if Price.fromstring(ansx).currency in ['USD', 'EUR', 'JPY', 'VND', 'LB', '$','£','¥','€']:
-                    finalPD.at[index,'answer'] = float(Price.fromstring(ansx).amount)
+                    try:
+                        finalPD.at[index,'answer'] = float(Price.fromstring(ansx).amount)
+                    except:
+                        finalPD.at[index,'answer'] =  0    
+                    
                     currency = Price.fromstring(ansx).currency
                 elif Price.fromstring(ansy).currency in ['USD', 'EUR', 'JPY', 'VND', 'LB', '$','£','¥','€']:
-                    finalPD.at[index,'answer'] = float(Price.fromstring(ansy).amount)
+                    try:
+                        finalPD.at[index,'answer'] = float(Price.fromstring(ansy).amount)
+                    except:
+                        finalPD.at[index,'answer'] =  0    
                     currency = Price.fromstring(ansy).currency
         ####################### REFINE FINAL ##################################
         filter_TODELETE = finalPD['question2header'].str.contains('TOBE DELETED') == False
@@ -347,6 +552,7 @@ for k, v in output_dictionary_png_df.items():
         finalPD_addCurrency.reset_index(drop=True, inplace=True)
         
         invoieNoDf = finalPD_addCurrency.loc[finalPD_addCurrency['question2header'].isin(['Invoice No'])]
+        invoieNoDf = invoieNoDf.loc[invoieNoDf['answer'].apply(lambda x: True if any(x in i for i in file.split(' ')) else False)] #invoieNoDf.loc[invoieNoDf['answer'].isin(file.split(' '))]
         invoieNoDf['answer'] = invoieNoDf.groupby(['question2header'])['answer'].transform(lambda x : '\n'.join(x)).drop_duplicates()
         invoieNoDf = invoieNoDf.drop_duplicates()
         invoieNoDf.dropna(inplace=True)
@@ -431,7 +637,7 @@ for k, v in output_dictionary_png_df.items():
             unitDF = unitDF[-1:]
             pass
         
-        packingMethodDF = finalPD_addCurrency.loc[finalPD_addCurrency['question2header'].isin(['PackingMethod'])]        
+        packingMethodDF = finalPD_addCurrency.loc[finalPD_addCurrency['question2header'].isin(['PackingMethod'])]
         packingMethodDF = packingMethodDF.drop(packingMethodDF[packingMethodDF['answer'].str.isdigit()].index)
         packingMethodDF = packingMethodDF[0:1]
         

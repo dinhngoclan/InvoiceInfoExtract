@@ -68,6 +68,97 @@ for file in filenames:
     halfTopImage = images[0].crop((0, 0, width, int(height/2)))
     halfTopImage.save(file+'.png', "PNG")
     img = remove_black_dot3(file+'.png')
+    
+    
+def extQuestionAnswerGraphFunc(graph, file=None, tablePD=None, considerWidth=None):
+    #DELETE Redundant relations
+    tx = graph.begin()                            
+    tx.evaluate('''
+                match (q1:QUESTION)-[r1:RELATED]->(a:ANSWER),
+                     (q2:QUESTION)-[r2:RELATED]->(a:ANSWER)
+                where r2.x > r1.x 
+                    and 0 < q2.y0-10 <= q1.y0 <= q2.y0+10
+                delete r2;
+                ''')
+    graph.commit(tx)
+     
+    ################# CONNECT below ANS TO above QUESTION #########################
+    #CASE:
+    try:
+        filter1 = table['words'].str.contains('descript|Descript|DESCRIPT')
+        description_y0 = table.where(filter1).dropna().reset_index(drop=True)['origBoxes'].iloc[0][1]
+    except:
+        description_y0 = 950
+    tx = graph.begin()
+    tx.evaluate('''
+                with ['quantity', 'unit', 'net', 'gross', 'amount','total','po no','pono','no'] as not_map_now //Unit here is UnitPrice
+                match (q:QUESTION), (a:ANSWER)
+                where not((q:QUESTION)-[]->(:QUESTION)) //end word in A question string
+                    and not any (word in not_map_now where toLower(q.word) contains word)
+                    //and NONE( x in ['PO NO','PONO','NO'] where q.word contains x) //some time 'PO' 'NO' are on 2 different nodes
+                    and not((:ANSWER)-[]->(a:ANSWER)) //start word in answer string
+                    and abs(a.y0 - q.y1) < 35
+                    and abs(a.x0 - q.x0) < $width/3.5
+                    and q.y0 < $description_y0 // 950 date modify: 20220725
+                create (q)-[:RELATED {y:abs(a.y0 - q.y1), x:abs(a.x1 - q.x0)}]->(a);
+                ''', parameters = {'width': considerWidth, 'description_y0':description_y0})
+    graph.commit(tx)
+    
+    #CASE: Summarize table (Description of Goods)
+    focusHigh = 550
+    if file:
+        if "INVOICE" in file or "bottom" in file:     
+            focusHigh = 650
+   
+    
+    tx = graph.begin()
+    tx.evaluate('''
+        with ['quantity', 'unit', 'net', 'gross', 'amount','goods', 'total'] as qung //Unit here is UnitPrice, [20220802]
+        match (q1:QUESTION)-[r1:RELATED]->(a:ANSWER),
+              (q2:QUESTION)-[r2:RELATED]->(a:ANSWER)
+        where r2.x > r1.x
+            and not any (word in qung where toLower(q2.word) contains word)
+            and 0 < q2.y0-10 <= q1.y0 <= q2.y0+10
+        delete r2;
+        ''')
+    graph.commit(tx)
+    
+    tx = graph.begin()
+    tx.evaluate('''
+        match (a1:ANSWER)-[r1:NEXTWORD]->(a11:ANSWER),
+              (a1:ANSWER)-[r2:NEXTWORD]->(a12:ANSWER)
+        where abs(a11.y0 - a12.y0) < 3 and abs(a11.y1 - a12.y1) < 3 
+            and a11.x1 < a12.x0
+        delete r2;
+        ''')
+    graph.commit(tx)
+    
+    
+    ##################### FORCE some :OTHER to become :ANSWER #####################
+    #####            Concate the right :OTHER to the left :ANSWER
+    tx = graph.begin()
+    tx.evaluate('''
+                match p=(q:QUESTION) - [*1..] -> (a:ANSWER), (o:OTHER)
+                where any(rel in relationships(p) WHERE type(rel) = "RELATED")
+                    and not((:QUESTION)-[:NEXTWORD]->(q:QUESTION)) //get the longest path
+                    and not((a:ANSWER)-[:NEXTWORD]->()) //get the longest path
+                    and abs(a.y0 - o.y0) < 20 
+                    and o.x0 - a.x1 > 0 //:OTHER must right of :ANSWER
+                    and o.x0 - a.x1 <= 250
+                REMOVE o:OTHER
+                SET o:ANSWER
+                create (a)-[:NEXTWORD {y:abs(a.y0 - o.y0)}]->(o);
+                ''')
+    graph.commit(tx)
+    
+    tx = graph.begin()             
+    tx.evaluate('''
+                match (q1:QUESTION)-[r1:RELATED]->(a:ANSWER),
+                     (q2:QUESTION)-[r2:RELATED]->(a:ANSWER)
+                where r2.y > r1.y+4.2
+                delete r2;
+                ''')
+    graph.commit(tx)
 
 feature_extractor = LayoutLMv2FeatureExtractor.from_pretrained(r".\savedmodel", ocr_lang='vie')#("microsoft/layoutlmv2-base-uncased")
 tokenizer = LayoutLMv2TokenizerFast.from_pretrained(r".\savedmodel")#("microsoft/layoutlmv2-base-uncased")
@@ -76,8 +167,8 @@ model = LayoutLMv2ForTokenClassification.from_pretrained(r".\savedmodel")
 #uri = "neo4j+s://dff0ff04.databases.neo4j.io"
 uri = "neo4j://localhost:7687"
 user = "neo4j"
-#password = "CJY__L21_jWwCzLqipfOM0WrAoPOH7LEomMCfN2GFN0"
-password = "pa@ss"
+password = "CJY__L21_jWwCzLqipfOM0WrAoPOH7LEomMCfN2GFN0"
+
 graph = Graph(uri, auth=(user, password))
 
 
@@ -94,7 +185,9 @@ lstHasToBeAnswer=["(month)","tháng","(year)","năm"]
 invoice_info_extract_from_png(feature_extractor, tokenizer, model, graph, os.path.abspath(r".\InvoicesDirectory"), question2header_func, 
                               switcher = switcherEinvoice, tablePred=None, out_collection=output_dictionary_png_df, 
                               cut_image=None, image_shear=0.02,#0.035,
-                              lstHasToBeQuestion=lstHasToBeQuestion,lstHasToBeAnswer=lstHasToBeAnswer)
+                              lstHasToBeQuestion=lstHasToBeQuestion,
+                              lstHasToBeAnswer=lstHasToBeAnswer,
+                              extQuestionAnswerGraphFunc=extQuestionAnswerGraphFunc)
 
 import tabula
 fileFullnames = glob.glob(r".\InvoicesDirectory" + "\*.pdf")
